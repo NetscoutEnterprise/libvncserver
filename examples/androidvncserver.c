@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <linux/input.h>
+#include <linux/uinput.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -45,8 +46,7 @@ static char KBD_DEVICE[256] = "/dev/input/event3";
 static char TOUCH_DEVICE[256] = "/dev/input/event1";
 static struct fb_var_screeninfo scrinfo;
 static int fbfd = -1;
-static int kbdfd = -1;
-static int touchfd = -1;
+static int uinputfd = -1;
 static unsigned short int *fbmmap = MAP_FAILED;
 static unsigned short int *vncbuf;
 static unsigned short int *fbbuf;
@@ -57,6 +57,11 @@ static rfbScreenInfoPtr vncscr;
 
 static int xmin, xmax;
 static int ymin, ymax;
+
+static int left_button_pressed = 0;
+
+static int activeClients = 0;
+
 
 /* No idea, just copied from fbvncserver as part of the frame differerencing
  * algorithm.  I will probably be later rewriting all of this. */
@@ -123,53 +128,142 @@ static void cleanup_fb(void)
 	}
 }
 
-static void init_kbd()
+static int init_uinput()
 {
-	if((kbdfd = open(KBD_DEVICE, O_RDWR)) == -1)
+    // Setup from getting-started-with-uinput
+	if((uinputfd = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) == -1)
 	{
-		printf("cannot open kbd device %s\n", KBD_DEVICE);
+		printf("cannot open /dev/uinput\n");
 		exit(EXIT_FAILURE);
 	}
-}
 
-static void cleanup_kbd()
-{
-	if(kbdfd != -1)
-	{
-		close(kbdfd);
-	}
-}
+    if (ioctl(uinputfd, UI_SET_EVBIT, EV_KEY) == -1)
+    {
+        goto init_fail1;
+    }
 
-static void init_touch()
-{
-    struct input_absinfo info;
-        if((touchfd = open(TOUCH_DEVICE, O_RDWR)) == -1)
+    if (ioctl(uinputfd, UI_SET_EVBIT, EV_REP) == -1)
+    {
+        goto init_fail2;
+    }
+
+    if (ioctl(uinputfd, UI_SET_EVBIT, EV_SYN) == -1)
+        goto init_fail3;
+
+    if (ioctl(uinputfd, UI_SET_EVBIT, EV_ABS) == -1)
+    {
+        goto init_fail3;
+    }
+
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_X) == -1)
+    {
+        goto init_fail4;
+    }
+
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_Y) == -1)
+    {
+        goto init_fail5;
+    }
+
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_MT_POSITION_X) == -1)
+    {
+        goto init_fail5;
+    }
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_MT_POSITION_X) == -1)
+    {
+        goto init_fail5;
+    }
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_MT_PRESSURE) == -1)
+    {
+        goto init_fail5;
+    }
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR) == -1)
+    {
+        goto init_fail5;
+    }
+    if (ioctl(uinputfd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID) == -1)
+    {
+        goto init_fail5;
+    }
+    if (ioctl(uinputfd, UI_SET_PROPBIT, INPUT_PROP_DIRECT) == -1)
+    {
+        goto init_fail5;
+    }
+
+    {
+      int key;
+      for (key = 0; key < KEY_MAX; key++)
+      {
+        if (ioctl(uinputfd, UI_SET_KEYBIT, key) == -1)
         {
-                printf("cannot open touch device %s\n", TOUCH_DEVICE);
-                exit(EXIT_FAILURE);
+          goto init_fail6;
         }
-    // Get the Range of X and Y
-    if(ioctl(touchfd, EVIOCGABS(ABS_X), &info)) {
-        printf("cannot get ABS_X info, %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+      }
     }
-    xmin = info.minimum;
-    xmax = info.maximum;
-    if(ioctl(touchfd, EVIOCGABS(ABS_Y), &info)) {
-        printf("cannot get ABS_Y, %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-    ymin = info.minimum;
-    ymax = info.maximum;
 
+    {
+        struct uinput_user_dev uidev;
+        memset(&uidev, 0, sizeof(uidev));
+
+        snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "androidvnc");
+        uidev.id.bustype = BUS_VIRTUAL; //BUS_USB;
+        uidev.id.vendor  = 1; //0x1234;
+        uidev.id.product = 1; //0xfedc;
+        uidev.id.version = 1;
+
+        uidev.absmin[ABS_X] = 0;
+        uidev.absmax[ABS_X] = 0x7fff;
+        uidev.absfuzz[ABS_X] = 0;
+        uidev.absflat[ABS_X] = 0;
+
+        uidev.absmin[ABS_Y] = 0;
+        uidev.absmax[ABS_Y] = 0x7fff;
+        uidev.absfuzz[ABS_Y] = 0;
+        uidev.absflat[ABS_Y] = 0;
+
+        if (write(uinputfd, &uidev, sizeof(uidev)) != sizeof(uidev))
+        {
+            goto init_fail7;
+        }
+        
+        if(ioctl(uinputfd, UI_DEV_CREATE) == -1)
+        {
+            goto init_fail8;
+        }
+    }
+
+    return 0;
+
+    init_fail8:
+    init_fail7:
+    init_fail6:
+    init_fail5:
+    init_fail4:
+    init_fail3:
+    init_fail2:
+    init_fail1:
+
+    return -1;
+        
 }
 
-static void cleanup_touch()
+static void cleanup_uinput()
 {
-	if(touchfd != -1)
+	if(uinputfd != -1)
 	{
-		close(touchfd);
+		close(uinputfd);
 	}
+}
+
+void clientGoneHook(struct _rfbClientRec* cl) {
+    activeClients--;
+    return;
+}
+
+enum rfbNewClientAction clientHook(struct _rfbClientRec* cl) {
+    cl->clientGoneHook = clientGoneHook;
+    activeClients++;
+  return RFB_CLIENT_ACCEPT;
 }
 
 /*****************************************************************************/
@@ -189,7 +283,7 @@ static void init_fb_server(int argc, char **argv)
 	assert(fbbuf != NULL);
 
 	/* TODO: This assumes scrinfo.bits_per_pixel is 16. */
-	vncscr = rfbGetScreen(&argc, argv, scrinfo.xres, scrinfo.yres, 5, 2, (scrinfo.bits_per_pixel / 8));
+	vncscr = rfbGetScreen(&argc, argv, scrinfo.xres, scrinfo.yres, 5, 0, (scrinfo.bits_per_pixel / 8));
 	assert(vncscr != NULL);
 
 	vncscr->desktopName = "Android";
@@ -200,6 +294,7 @@ static void init_fb_server(int argc, char **argv)
 
 	vncscr->kbdAddEvent = keyevent;
 	vncscr->ptrAddEvent = ptrevent;
+    vncscr->newClientHook = clientHook;
 
 	rfbInitServer(vncscr);
 
@@ -223,7 +318,7 @@ void injectKeyEvent(uint16_t code, uint16_t value)
     ev.type = EV_KEY;
     ev.code = code;
     ev.value = value;
-    if(write(kbdfd, &ev, sizeof(ev)) < 0)
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
     {
         printf("write event failed, %s\n", strerror(errno));
     }
@@ -231,21 +326,55 @@ void injectKeyEvent(uint16_t code, uint16_t value)
     printf("injectKey (%d, %d)\n", code , value);    
 }
 
+void injectSyncEvent(int code)
+{
+    struct input_event ev;
+    memset(&ev, 0, sizeof(ev));
+    gettimeofday(&ev.time,0);
+    ev.type = EV_SYN;
+    ev.code = code;
+    ev.value = 0;
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write sync event failed, %s\n", strerror(errno));
+    }
+
+    printf("injectSyncEvent %d\n", code);    
+}
+
+void injectMiscEvent(int type, int code, int value)
+{
+    struct input_event ev;
+    memset(&ev, 0, sizeof(ev));
+    gettimeofday(&ev.time,0);
+    ev.type = type;
+    ev.code = code;
+    ev.value = value;
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write sync event failed, %s\n", strerror(errno));
+    }
+
+    printf("injectSyncEvent %d %d %d\n", type, code, value);    
+}
+
+
 static int keysym2scancode(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
     int scancode = 0;
 
     int code = (int)key;
-    if (code>='0' && code<='9') {
-        scancode = (code & 0xF) - 1;
-        if (scancode<0) scancode += 10;
-        scancode += KEY_1;
+    if (code>='1' && code<='9') {
+        scancode = (code - '1') + KEY_1;
+    } else if (code == '0') {
+        scancode = 11;
     } else if (code>=0xFF50 && code<=0xFF58) {
         static const uint16_t map[] =
              {  KEY_HOME, KEY_LEFT, KEY_UP, KEY_RIGHT, KEY_DOWN,
-                KEY_SOFT1, KEY_SOFT2, KEY_END, 0 };
+                KEY_HOME, KEY_LEFT, /*KEY_SOFT1, KEY_SOFT2,*/ KEY_END, 0 };
         scancode = map[code & 0xF];
-    } else if (code>=0xFFE1 && code<=0xFFEE) {
+        } else if (code>=0xFFE1 && code<=0xFFEE) {
+    
         static const uint16_t map[] =
              {  KEY_LEFTSHIFT, KEY_LEFTSHIFT,
                 KEY_COMPOSE, KEY_COMPOSE,
@@ -264,10 +393,10 @@ static int keysym2scancode(rfbBool down, rfbKeySym key, rfbClientPtr cl)
         scancode = map[(code & 0x5F) - 'A'];
     } else {
         switch (code) {
-            case 0x0003:    scancode = KEY_CENTER;      break;
+//            case 0x0003:    scancode = KEY_CENTER;      break;
             case 0x0020:    scancode = KEY_SPACE;       break;
-            case 0x0023:    scancode = KEY_SHARP;       break;
-            case 0x0033:    scancode = KEY_SHARP;       break;
+//            case 0x0023:    scancode = KEY_SHARP;       break;
+//            case 0x0033:    scancode = KEY_SHARP;       break;
             case 0x002C:    scancode = KEY_COMMA;       break;
             case 0x003C:    scancode = KEY_COMMA;       break;
             case 0x002E:    scancode = KEY_DOT;         break;
@@ -280,7 +409,7 @@ static int keysym2scancode(rfbBool down, rfbKeySym key, rfbClientPtr cl)
             case 0xFF1B:    scancode = KEY_BACK;        break;
             case 0xFF09:    scancode = KEY_TAB;         break;
             case 0xFF0D:    scancode = KEY_ENTER;       break;
-            case 0x002A:    scancode = KEY_STAR;        break;
+//            case 0x002A:    scancode = KEY_STAR;        break;
             case 0xFFBE:    scancode = KEY_F1;        break; // F1
             case 0xFFBF:    scancode = KEY_F2;         break; // F2
             case 0xFFC0:    scancode = KEY_F3;        break; // F3
@@ -296,44 +425,95 @@ static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
 	int scancode;
 
-	printf("Got keysym: %04x (down=%d)\n", (unsigned int)key, (int)down);
-
-	if ((scancode = keysym2scancode(down, key, cl)))
-	{
-		injectKeyEvent(scancode, down);
-	}
+    if (down)
+    {
+        if ((scancode = keysym2scancode(down, key, cl)))
+        {
+            printf("Got keysym: %04x (down=%d) scancode=%d\n", (unsigned int)key, (int)down, scancode);
+            injectKeyEvent(scancode, down);
+            injectKeyEvent(scancode, 0);
+            injectSyncEvent(SYN_REPORT);
+        }
+    }
 }
 
-void injectTouchEvent(int down, int x, int y)
+void injectTouchEvent(int down)
 {
     struct input_event ev;
-    
+    memset(&ev, 0, sizeof(ev));
+    gettimeofday(&ev.time,0);
+    printf("touch=%d\n", down);
+    #if 1
+    ev.type = EV_KEY;
+    ev.code = BTN_TOUCH;
+    ev.value = down;
+    #else
+    ev.type = EV_ABS;
+    ev.code = ABS_MT_PRESSURE;
+    if (down)
+    {
+        ev.value = 494;
+    } else {
+        ev.value = 0;
+    }
+    #endif
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write event failed, %s\n", strerror(errno));
+    }
+    ev.type = EV_KEY;
+    ev.code = BTN_LEFT;
+    ev.value = down;
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write event failed, %s\n", strerror(errno));
+    }
+}
+
+void injectMouseEvent(int x, int y) {
+    struct input_event ev;
+    printf("mouse %d %d\n", x, y);
+    memset(&ev, 0, sizeof(ev));
+    ev.type = EV_ABS;
+    #if 1
+    ev.code = ABS_X;
+    #else
+    ev.code = ABS_MT_POSITION_X;
+    #endif
+    ev.value = x;
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write event failed, %s\n", strerror(errno));
+    }
+    gettimeofday(&ev.time,0);
+    ev.type = EV_ABS;
+    #if 1
+    ev.code = ABS_Y;
+    #else
+    ev.code = ABS_MT_POSITION_Y;
+    #endif
+    ev.value = y;
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
+    {
+        printf("write event failed, %s\n", strerror(errno));
+    }
+}
+
+#if 0
     // Calculate the final x and y
     /* Fake touch screen always reports zero */
     if (xmin != 0 && xmax != 0 && ymin != 0 && ymax != 0)
     {
         x = xmin + (x * (xmax - xmin)) / (scrinfo.xres);
         y = ymin + (y * (ymax - ymin)) / (scrinfo.yres);
-    }
-    
-    memset(&ev, 0, sizeof(ev));
-
     // Then send a BTN_TOUCH
-    gettimeofday(&ev.time,0);
-    ev.type = EV_KEY;
-    ev.code = BTN_TOUCH;
-    ev.value = down;
-    if(write(touchfd, &ev, sizeof(ev)) < 0)
-    {
-        printf("write event failed, %s\n", strerror(errno));
-    }
 
     // Then send the X
     gettimeofday(&ev.time,0);
     ev.type = EV_ABS;
     ev.code = ABS_X;
     ev.value = x;
-    if(write(touchfd, &ev, sizeof(ev)) < 0)
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
     {
         printf("write event failed, %s\n", strerror(errno));
     }
@@ -343,7 +523,7 @@ void injectTouchEvent(int down, int x, int y)
     ev.type = EV_ABS;
     ev.code = ABS_Y;
     ev.value = y;
-    if(write(touchfd, &ev, sizeof(ev)) < 0)
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
     {
         printf("write event failed, %s\n", strerror(errno));
     }
@@ -353,15 +533,15 @@ void injectTouchEvent(int down, int x, int y)
     ev.type = EV_SYN;
     ev.code = 0;
     ev.value = 0;
-    if(write(touchfd, &ev, sizeof(ev)) < 0)
+    if(write(uinputfd, &ev, sizeof(ev)) < 0)
     {
         printf("write event failed, %s\n", strerror(errno));
     }
+#endif
 
-    printf("injectTouchEvent (x=%d, y=%d, down=%d)\n", x , y, down);    
-}
 
-static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl)
+
+static void ptrevent(int buttonMask, int _x, int _y, rfbClientPtr cl)
 {
 	/* Indicates either pointer movement or a pointer button press or release. The pointer is
 now at (x-position, y-position), and the current state of buttons 1 to 8 are represented
@@ -371,18 +551,50 @@ buttons on the mouse. On a wheel mouse, each step of the wheel upwards is repres
 by a press and release of button 4, and each step downwards is represented by
 a press and release of button 5. 
   From: http://www.vislab.usyd.edu.au/blogs/index.php/2009/05/22/an-headerless-indexed-protocol-for-input-1?blog=61 */
-	
-	//printf("Got ptrevent: %04x (x=%d, y=%d)\n", buttonMask, x, y);
-	if(buttonMask & 1) {
-		// Simulate left mouse event as touch event
-		injectTouchEvent(1, x, y);
-		injectTouchEvent(0, x, y);
-	} 
+    static int leftPressed = 0;
+    static int rightPressed = 0;
+    int x, y;
+    
+    x = (_x * 0x7fff) / cl->screen->width;
+    y = (_y * 0x7fff) / cl->screen->height;
+
+    if(buttonMask & 1) {
+        printf("_x=%X _y=%X w=%X H=%X x=%x y=%x\n", _x, _y, cl->screen->width, cl->screen->height, x, y);
+        if(!leftPressed) {
+            leftPressed = 1;
+            //printf("injectTouchEvent (x=%d, y=%d, down=%d)\n", x , y, buttonMask);    
+//            printf("%d %d\n", x, y);
+            injectMouseEvent(x, y);
+            injectTouchEvent(1);
+//            injectMiscEvent(EV_ABS, ABS_MT_TOUCH_MAJOR, 1);
+//            injectMiscEvent(EV_ABS, ABS_MT_TRACKING_ID, 0);
+//            injectSyncEvent(SYN_MT_REPORT);
+            injectSyncEvent(SYN_REPORT);
+        } else {
+            injectMouseEvent(x, y);
+//            injectMiscEvent(EV_ABS, ABS_MT_TOUCH_MAJOR, 1);
+//            injectMiscEvent(EV_ABS, ABS_MT_TRACKING_ID, 0);
+//            injectSyncEvent(SYN_MT_REPORT);
+            injectSyncEvent(SYN_REPORT);
+        }
+    } else {
+        if (leftPressed)
+        {
+            injectMouseEvent(x, y);
+            injectTouchEvent(0);
+//            injectMiscEvent(EV_ABS, ABS_MT_TOUCH_MAJOR, 1);
+//            injectMiscEvent(EV_ABS, ABS_MT_TRACKING_ID, 0);
+//            injectSyncEvent(SYN_MT_REPORT);
+            injectSyncEvent(SYN_REPORT);
+            leftPressed = 0;
+        }
+    }
+
 }
 
 #define PIXEL_FB_TO_RFB(p,r,g,b) ((p>>r)&0x1f001f)|(((p>>g)&0x1f001f)<<5)|(((p>>b)&0x1f001f)<<10)
 
-static void update_screen(void)
+static int update_screen(void)
 {
 	unsigned int *f, *c, *r;
 	int x, y;
@@ -398,7 +610,7 @@ static void update_screen(void)
 	{
 		/* Compare every 2 pixels at a time, assuming that changes are likely
 		 * in pairs. */
-		for (x = 0; x < scrinfo.xres; x += 2)
+		for (x = 0; x < scrinfo.xres; x += 1)
 		{
 			unsigned int pixel = *f;
 
@@ -408,24 +620,22 @@ static void update_screen(void)
 
 				/* XXX: Undo the checkered pattern to test the efficiency
 				 * gain using hextile encoding. */
-				if (pixel == 0x18e320e4 || pixel == 0x20e418e3)
-					pixel = 0x18e318e3;
+				//if (pixel == 0x18e320e4 || pixel == 0x20e418e3)
+				//	pixel = 0x18e318e3;
 
 				*r = PIXEL_FB_TO_RFB(pixel,
 				  varblock.r_offset, varblock.g_offset, varblock.b_offset);
 
 				if (x < varblock.min_i)
 					varblock.min_i = x;
-				else
-				{
-					if (x > varblock.max_i)
+				if (x > varblock.max_i)
 						varblock.max_i = x;
 
 					if (y > varblock.max_j)
 						varblock.max_j = y;
-					else if (y < varblock.min_j)
+					if (y < varblock.min_j)
 						varblock.min_j = y;
-				}
+				
 			}
 
 			f++, c++;
@@ -447,19 +657,37 @@ static void update_screen(void)
 
 		rfbMarkRectAsModified(vncscr, varblock.min_i, varblock.min_j,
 		  varblock.max_i + 2, varblock.max_j + 1);
-
-		rfbProcessEvents(vncscr, 10000);
+        return 1;
 	}
+    return 0;
 }
 
 /*****************************************************************************/
 
 void print_usage(char **argv)
 {
-	printf("%s [-k device] [-t device] [-h]\n"
-		"-k device: keyboard device node, default is /dev/input/event3\n"
-		"-t device: touch device node, default is /dev/input/event1\n"
-		"-h : print this help\n");
+	printf("%s [-h]\n"
+		"-h : print this help\n", argv[0]);
+}
+
+uint32_t elapsedTimeMsec(const struct timeval* start) {
+    struct timeval now;
+    uint32_t elapsedMsec;
+
+    gettimeofday(&now, NULL);
+    elapsedMsec = (now.tv_sec - start->tv_sec) * 1000;  // sec to msec
+    elapsedMsec += elapsedMsec + (now.tv_usec / 1000) - (start->tv_usec / 1000);
+    return elapsedMsec;
+}
+
+uint32_t elapsedTimeUsec(const struct timeval* start) {
+    struct timeval now;
+    uint32_t elapsedUsec;
+
+    gettimeofday(&now, NULL);
+    elapsedUsec = (now.tv_sec - start->tv_sec) * 1000000;  // sec to Usec
+    elapsedUsec = elapsedUsec + now.tv_usec - start->tv_usec;
+    return elapsedUsec;
 }
 
 int main(int argc, char **argv)
@@ -477,14 +705,6 @@ int main(int argc, char **argv)
 						print_usage(argv);
 						exit(0);
 						break;
-					case 'k':
-						i++;
-						strcpy(KBD_DEVICE, argv[i]);
-						break;
-					case 't':
-						i++;
-						strcpy(TOUCH_DEVICE, argv[i]);
-						break;
 				}
 			}
 			i++;
@@ -493,10 +713,9 @@ int main(int argc, char **argv)
 
 	printf("Initializing framebuffer device " FB_DEVICE "...\n");
 	init_fb();
-	printf("Initializing keyboard device %s ...\n", KBD_DEVICE);
-	init_kbd();
-	printf("Initializing touch device %s ...\n", TOUCH_DEVICE);
-	init_touch();
+	printf("Initializing uinput device ...\n");
+	if(init_uinput() != 0)
+      goto main_fail_1;
 
 	printf("Initializing VNC server:\n");
 	printf("	width:  %d\n", (int)scrinfo.xres);
@@ -505,18 +724,48 @@ int main(int argc, char **argv)
 	printf("	port:   %d\n", (int)VNC_PORT);
 	init_fb_server(argc, argv);
 
-	/* Implement our own event loop to detect changes in the framebuffer. */
-	while (1)
-	{
-		while (vncscr->clientHead == NULL)
-			rfbProcessEvents(vncscr, 100000);
+    {
+        struct timeval start;
+        gettimeofday(&start, NULL);
+        uint32_t delay = 10;
 
-		rfbProcessEvents(vncscr, 100000);
-		update_screen();
-	}
+        /* Implement our own event loop to detect changes in the framebuffer. */
+        while (1)
+        {
+            do {
+                uint32_t elapsed = elapsedTimeMsec(&start);
+                if (elapsed < delay)
+                {
+                    rfbProcessEvents(vncscr, (delay - elapsed) * 1000);
+                } else {
+                    break;
+                }
+            } while(1);
 
+            if (activeClients)
+            {
+                int clean;
+                gettimeofday(&start, NULL);
+                clean = update_screen();
+                printf("scr delay=%d  elapsedUsec=%d\n", delay, elapsedTimeUsec(&start));
+                if(!update_screen()) {
+                    if (delay < 1000)
+                    {
+                        delay += 50;
+                    }
+                } else {
+                    delay = 100;
+                }
+            } else {
+                delay = 500;
+            }
+            gettimeofday(&start, NULL);
+        }
+    }
+
+    main_fail_1:
 	printf("Cleaning up...\n");
 	cleanup_fb();
-	cleanup_kdb();
-	cleanup_touch();
+	cleanup_uinput();
 }
+
