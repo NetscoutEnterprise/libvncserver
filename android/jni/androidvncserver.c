@@ -610,7 +610,7 @@ static int update_screen(void)
 	{
 		/* Compare every 2 pixels at a time, assuming that changes are likely
 		 * in pairs. */
-		for (x = 0; x < scrinfo.xres; x += 1)
+		for (x = 0; x < scrinfo.xres; x += 2)
 		{
 			unsigned int pixel = *f;
 
